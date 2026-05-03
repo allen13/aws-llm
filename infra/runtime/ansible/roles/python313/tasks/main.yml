@@ -1,0 +1,44 @@
+---
+# Python 3.13 from Astral's python-build-standalone. Avoids the deadsnakes
+# PPA path because launchpad.net's IPv4 range is blocked from this VPC.
+
+- name: Detect existing python3.13
+  ansible.builtin.command: "{{ py313_link }} --version"
+  register: py313_check
+  failed_when: false
+  changed_when: false
+
+- name: Set fact for whether install is needed
+  ansible.builtin.set_fact:
+    py313_install_needed: >-
+      {{ py313_check.rc != 0 or ('Python 3.13' not in py313_check.stdout) }}
+
+- name: Ensure install dir exists
+  ansible.builtin.file:
+    path: "{{ py313_install_dir }}"
+    state: directory
+    mode: "0755"
+  when: py313_install_needed
+
+- name: Download python-build-standalone tarball
+  ansible.builtin.get_url:
+    url: "{{ py313_url }}"
+    dest: "/tmp/{{ py313_tarball_name }}"
+    mode: "0644"
+  when: py313_install_needed
+
+- name: Extract Python install
+  ansible.builtin.unarchive:
+    src: "/tmp/{{ py313_tarball_name }}"
+    dest: "{{ py313_install_dir }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    creates: "{{ py313_bin }}"
+  when: py313_install_needed
+
+- name: Symlink /usr/local/bin/python3.13
+  ansible.builtin.file:
+    src: "{{ py313_bin }}"
+    dest: "{{ py313_link }}"
+    state: link
+    force: true

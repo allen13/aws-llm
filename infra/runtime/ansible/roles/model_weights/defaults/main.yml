@@ -1,0 +1,14 @@
+---
+# /opt/state/models/nemotron-nano-30b-fp8 is canonical home for the FP8
+# checkpoint. /opt/models is bind-mounted onto /opt/state/models so the
+# vLLM container's `-v /opt/models/...:/models:ro` works regardless of
+# whether the state volume is mounted (degrades to root volume on the
+# fallback path, with the documented page-cache thrash risk).
+model_dirname:    nemotron-nano-30b-fp8
+model_state_dir:  "{{ state_mount }}/models"
+model_full_path:  "{{ model_state_dir }}/{{ model_dirname }}"
+model_marker:     "{{ state_mount }}/markers/model.staged"
+
+# Re-verify against S3 if the marker is older than this. Cheap (HEAD-only)
+# but bounds drift if the canonical model is updated upstream.
+model_resync_max_age_seconds: 604800   # 7 days

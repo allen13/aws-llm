@@ -1,0 +1,3 @@
+---
+docker_data_root: "{{ state_mount }}/docker"
+docker_daemon_config: /etc/docker/daemon.json

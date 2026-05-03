@@ -1,0 +1,9 @@
+---
+# */5 keeps API call rate well below SQS / EventBridge / dispatcher cadence.
+ansible_cron_minute: "*/5"
+ansible_cron_hour: "*"
+ansible_cron_user: root
+
+ansible_cron_lock_file: /var/run/aws-llm-ansible.lock
+ansible_cron_log: "{{ log_dir }}/ansible-cron.log"
+ansible_run_script: /opt/aws-llm-ansible/run.sh

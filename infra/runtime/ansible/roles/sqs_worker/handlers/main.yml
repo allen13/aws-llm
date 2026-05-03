@@ -1,0 +1,7 @@
+---
+- name: reload systemd and restart sqs worker
+  ansible.builtin.systemd:
+    name: aws-llm-sqs-worker.service
+    state: restarted
+    daemon_reload: true
+  listen: sqs worker unit changed

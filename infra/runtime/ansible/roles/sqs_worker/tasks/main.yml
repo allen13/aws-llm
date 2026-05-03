@@ -1,0 +1,20 @@
+---
+# SQS worker systemd unit. Idempotent: template + systemd:state=started.
+# Handler restarts only when unit file content changes.
+
+- name: Render SQS worker systemd unit
+  ansible.builtin.template:
+    src: aws-llm-sqs-worker.service.j2
+    dest: /etc/systemd/system/aws-llm-sqs-worker.service
+    mode: "0644"
+  notify: sqs worker unit changed
+
+- name: Flush handlers (apply unit change immediately)
+  ansible.builtin.meta: flush_handlers
+
+- name: Ensure SQS worker is enabled and started
+  ansible.builtin.systemd:
+    name: aws-llm-sqs-worker.service
+    enabled: true
+    state: started
+    daemon_reload: true

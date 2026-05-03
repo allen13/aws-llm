@@ -1,0 +1,19 @@
+---
+# AMI ships /usr/local/cuda → /usr/local/cuda-12.9. Driver and the vLLM
+# image are CUDA 13.0; repoint so any host-side tooling (nvcc, cuda-linked
+# pip wheels in the venv) picks the right toolkit.
+#
+# vLLM container ships its own CUDA libs so the container is unaffected.
+
+- name: Detect CUDA 13.0 toolkit presence
+  ansible.builtin.stat:
+    path: /usr/local/cuda-13.0
+  register: cuda13_dir
+
+- name: Repoint /usr/local/cuda → cuda-13.0
+  ansible.builtin.file:
+    src: /usr/local/cuda-13.0
+    dest: /usr/local/cuda
+    state: link
+    force: true
+  when: cuda13_dir.stat.exists

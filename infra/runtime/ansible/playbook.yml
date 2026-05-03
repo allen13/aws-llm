@@ -1,0 +1,60 @@
+---
+# aws-llm runtime configuration playbook.
+#
+# Invoked by:
+#   - bootstrap-shim.sh on first boot (via aws-llm-bootstrap.service)
+#   - /opt/aws-llm-ansible/run.sh on every cron tick (every 5 min)
+#
+# Both paths invoke the playbook the same way:
+#   ansible-playbook -i inventory/local.yml -c local playbook.yml
+# with /etc/environment values passed as --extra-vars.
+#
+# Role order is significant: each role's idempotency assumes the previous
+# role's invariants. ansible_cron is last so a failure mid-playbook never
+# leaves a working cron behind to thrash on broken state.
+
+- name: aws-llm runtime configuration
+  hosts: localhost
+  gather_facts: true
+  become: true
+  any_errors_fatal: true
+
+  pre_tasks:
+    - name: Ensure log directory exists
+      ansible.builtin.file:
+        path: "{{ log_dir }}"
+        state: directory
+        mode: "0775"
+
+    - name: Validate required vars present
+      ansible.builtin.assert:
+        that:
+          - artifacts_bucket | length > 0
+          - aws_region | length > 0
+          - model_s3_uri | length > 0
+          - vllm_image_uri | length > 0
+          - jobs_queue_url | length > 0
+          - state_volume_id | length > 0
+        fail_msg: >-
+          One or more required vars are empty. These come from /etc/environment
+          (written by user_data.tftpl) and are passed via run.sh. If you're
+          running the playbook by hand, pass --extra-vars manually.
+
+  roles:
+    - role: cuda_symlink
+    - role: state_volume
+    - role: python313
+    - role: model_weights
+    - role: extract_code
+    - role: datasets
+    - role: docker_runtime
+    - role: vllm_container
+    - role: sqs_worker
+    - role: ansible_cron
+
+  post_tasks:
+    - name: Touch bootstrap.done sentinel
+      ansible.builtin.copy:
+        dest: "{{ bootstrap_done }}"
+        content: "{{ ansible_date_time.iso8601 }}\n"
+        mode: "0644"

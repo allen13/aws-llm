@@ -1,0 +1,8 @@
+# The runtime instance manages itself. ansible-playbook is invoked with
+# `-c local` so this inventory's only role is to define the localhost
+# group with the right Python interpreter.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: "{{ ansible_venv_python }}"

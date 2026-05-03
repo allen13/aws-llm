@@ -1,0 +1,6 @@
+---
+dataset_name:       aixblock-92k
+dataset_state_dir:  "{{ state_mount }}/data"
+dataset_marker:     "{{ state_mount }}/markers/datasets.staged"
+dataset_s3_prefix:  "datasets/{{ dataset_name }}/"
+dataset_manifest_key: "datasets/{{ dataset_name }}/manifest.json"

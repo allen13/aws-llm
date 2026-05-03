@@ -1,0 +1,19 @@
+---
+# Install the cron entry that re-runs run.sh every 5 min. flock-guarded so
+# overlapping runs don't race. This role is the LAST in playbook.yml so a
+# failed first run never leaves an active cron behind.
+
+- name: Ensure run.sh is executable
+  ansible.builtin.file:
+    path: "{{ ansible_run_script }}"
+    mode: "0755"
+    state: file
+
+- name: Install ansible-cron entry
+  ansible.builtin.cron:
+    name: aws-llm-ansible-pull
+    user: "{{ ansible_cron_user }}"
+    minute: "{{ ansible_cron_minute }}"
+    hour: "{{ ansible_cron_hour }}"
+    job: "/usr/bin/flock -n {{ ansible_cron_lock_file }} {{ ansible_run_script }} >> {{ ansible_cron_log }} 2>&1"
+    cron_file: aws-llm-ansible

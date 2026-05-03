@@ -1,0 +1,83 @@
+---
+# Sync the aixblock-92k dataset to /opt/state/data, decompress shards,
+# and concat into calls.jsonl + smoke-25.jsonl. Idempotent via .staged
+# marker — once present, this whole role no-ops.
+
+- name: Probe dataset manifest in S3
+  ansible.builtin.command:
+    cmd: aws s3api head-object --bucket "{{ artifacts_bucket }}" --key "{{ dataset_manifest_key }}"
+  register: manifest_probe
+  failed_when: false
+  changed_when: false
+
+- name: Skip dataset role if manifest missing
+  ansible.builtin.debug:
+    msg: "Dataset manifest not staged in S3 — skipping. /opt/data/smoke-25.jsonl will not exist."
+  when: manifest_probe.rc != 0
+
+- name: Stage dataset (when manifest present)
+  when: manifest_probe.rc == 0
+  block:
+    - name: Ensure dataset state dir exists
+      ansible.builtin.file:
+        path: "{{ dataset_state_dir }}"
+        state: directory
+        mode: "0775"
+
+    - name: Stat staged marker
+      ansible.builtin.stat:
+        path: "{{ dataset_marker }}"
+      register: dataset_marker_stat
+
+    - name: aws s3 sync dataset
+      ansible.builtin.command:
+        cmd: aws s3 sync "s3://{{ artifacts_bucket }}/{{ dataset_s3_prefix }}" "{{ dataset_state_dir }}/{{ dataset_name }}/" --only-show-errors
+      register: ds_sync
+      changed_when: "'download:' in ds_sync.stdout or 'upload:' in ds_sync.stdout or 'delete:' in ds_sync.stdout"
+      when: not dataset_marker_stat.stat.exists
+
+    - name: Decompress shards
+      ansible.builtin.shell: |
+        for gz in {{ dataset_state_dir }}/{{ dataset_name }}/shard-*.jsonl.gz; do
+          [ -f "$gz" ] || continue
+          out="${gz%.gz}"
+          [ -f "$out" ] && [ "$out" -nt "$gz" ] && continue
+          gunzip -kf "$gz"
+        done
+      args:
+        executable: /bin/bash
+      register: gunzip_result
+      changed_when: gunzip_result.stdout | length > 0
+      when: not dataset_marker_stat.stat.exists
+
+    - name: Concat shards into calls.jsonl
+      ansible.builtin.shell: |
+        cat {{ dataset_state_dir }}/{{ dataset_name }}/shard-*.jsonl > {{ dataset_state_dir }}/calls.jsonl
+        head -25 {{ dataset_state_dir }}/calls.jsonl > {{ dataset_state_dir }}/smoke-25.jsonl
+      args:
+        executable: /bin/bash
+        creates: "{{ dataset_state_dir }}/calls.jsonl"
+      when: not dataset_marker_stat.stat.exists
+
+    - name: Touch staged marker
+      ansible.builtin.file:
+        path: "{{ dataset_marker }}"
+        state: touch
+        mode: "0644"
+      when: not dataset_marker_stat.stat.exists
+
+- name: Ensure /opt/data exists for bind mount
+  ansible.builtin.file:
+    path: "{{ canonical_data }}"
+    state: directory
+    mode: "0775"
+
+- name: Bind-mount /opt/data → state data dir
+  ansible.posix.mount:
+    path: "{{ canonical_data }}"
+    src: "{{ dataset_state_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+    boot: false
+  when: manifest_probe.rc == 0

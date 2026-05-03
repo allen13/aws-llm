@@ -1,0 +1,45 @@
+---
+# Cross-role defaults. Per-role specifics live under roles/<role>/defaults/main.yml
+# and override these.
+
+# Where the venv that hosts ansible's Python deps lives. boto3, docker SDK,
+# anything ansible imports goes here — keeps system Python untouched (PEP 668)
+# and the app venv at /opt/aws-llm-extract/.venv unentangled.
+ansible_venv:        /opt/ansible-venv
+ansible_venv_python: "{{ ansible_venv }}/bin/python"
+
+# Logs + sentinel
+log_dir:             /var/log/aws-llm
+bootstrap_done:      "{{ log_dir }}/bootstrap.done"
+
+# Persistent state volume. Mount point is the root of every persistable thing.
+state_mount:         /opt/state
+state_volume_tag_role: state
+
+# Canonical paths used by the rest of the system (Docker -v, /etc/environment,
+# Makefile). Ansible bind-mounts these onto state_mount/* on first boot.
+canonical_models:    /opt/models
+canonical_extract:   /opt/aws-llm-extract
+canonical_data:      /opt/data
+
+# Pulled from /etc/environment by ansible-playbook --extra-vars (run.sh).
+# Listed here as documentation of the contract; defaults are intentionally
+# empty so a missing var fails loudly rather than silently using a stale value.
+artifacts_bucket:    ""
+aws_region:          us-east-1
+model_s3_uri:        ""
+vllm_image_uri:      ""
+max_model_len:       8192
+max_num_seqs:        32
+model_name:          nemotron-nano-30b
+enable_thinking:     false
+jobs_queue_url:      ""
+asg_name:            aws-llm-runtime
+state_volume_id:     ""
+
+# Debugging: while iterating on the playbook + IAM + Docker config, keep
+# the worker from self-terminating so we can SSM in and the cron-driven
+# Ansible reconcile loop stays effective on a single long-lived instance.
+# Flip to false when the smoke run is consistently green and we want
+# real per-batch self-terminate behavior back.
+disable_self_terminate: true

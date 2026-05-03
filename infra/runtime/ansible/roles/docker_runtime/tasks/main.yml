@@ -1,0 +1,74 @@
+---
+# Configure Docker's data-root onto the persistent state volume so all
+# image layers, container writable layers, logs, anonymous volumes, and
+# build cache survive instance termination. The handler restarts docker
+# only when daemon.json content actually changes.
+
+- name: Ensure /etc/docker exists
+  ansible.builtin.file:
+    path: /etc/docker
+    state: directory
+    mode: "0755"
+
+- name: Ensure docker data-root dir exists on state volume
+  ansible.builtin.file:
+    path: "{{ docker_data_root }}"
+    state: directory
+    mode: "0700"
+
+- name: Render /etc/docker/daemon.json
+  ansible.builtin.template:
+    src: daemon.json.j2
+    dest: "{{ docker_daemon_config }}"
+    mode: "0644"
+  notify: docker daemon config changed
+
+- name: Flush handlers (restart docker now if config changed)
+  ansible.builtin.meta: flush_handlers
+
+# Per-instance container-metadata cleanup: image layers (overlay2/) survive
+# cross-instance fine, but docker's containers/ dir holds host-specific
+# RWLayer references. When the state volume is reattached to a NEW
+# instance, those references are stale and `docker start` errors with
+# "RWLayer is unexpectedly nil". Wipe containers/ once per instance and
+# mark a sentinel so subsequent ansible-cron ticks within the same
+# instance don't re-wipe (which would kill running vllm).
+- name: Stat per-instance docker-cleanup sentinel
+  ansible.builtin.stat:
+    path: "{{ state_mount }}/markers/docker-cleaned-{{ imds_instance_id }}"
+  register: docker_cleaned
+
+- name: Clean stale per-instance docker container metadata (one-shot per launch)
+  when: not docker_cleaned.stat.exists
+  block:
+    - name: Stop docker before wiping containers/
+      ansible.builtin.systemd:
+        name: docker
+        state: stopped
+
+    - name: Remove stale containers/ dir (image layers stay)
+      ansible.builtin.file:
+        path: "{{ docker_data_root }}/containers"
+        state: absent
+
+    - name: Remove stale runtime/* (host-specific exec state)
+      ansible.builtin.file:
+        path: "{{ docker_data_root }}/runtimes"
+        state: absent
+
+    - name: Restart docker
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+
+    - name: Touch per-instance sentinel
+      ansible.builtin.copy:
+        dest: "{{ state_mount }}/markers/docker-cleaned-{{ imds_instance_id }}"
+        content: "{{ ansible_date_time.iso8601 }}\n"
+        mode: "0644"
+
+- name: Ensure docker is running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true

@@ -1,0 +1,143 @@
+#!/bin/bash
+# user_data.tftpl — MINIMAL first-boot bootstrap.
+#
+# Goal: get observability up (CloudWatch agent + log shipping) and persist
+# runtime env vars, then hand off to a separately-stored `bootstrap-shim.sh` in
+# S3. This keeps user_data fast, low-risk, and re-runnable without an EC2
+# replacement: edit bootstrap-shim.sh, `aws s3 cp` it back, then SSM-trigger
+# `systemctl restart aws-llm-bootstrap` (or wait for systemd Restart=).
+#
+# What's intentionally NOT here (lives in the Ansible playbook,
+# bootstrap-shim.sh exec's run.sh which exec's ansible-playbook):
+#   - CUDA symlink repoint (cuda_symlink role)
+#   - Persistent state EBS attach + mount (state_volume role)
+#   - Python 3.13 install (python313 role)
+#   - 30 GB model sync from S3 (model_weights role)
+#   - Code tarball + pip install (extract_code role)
+#   - Dataset stage (datasets role)
+#   - Docker daemon config + vLLM container (docker_runtime + vllm_container)
+#   - SQS worker systemd unit (sqs_worker role)
+#   - */5 cron that re-runs the playbook (ansible_cron role)
+
+set -euxo pipefail
+# NOTE: do NOT redirect stdout/stderr. cloud-init writes user-data output to
+# /var/log/cloud-init-output.log AND to the EC2 console buffer (visible via
+# `aws ec2 get-console-output`). An explicit `exec >` here would suppress
+# console capture and leave us blind if the CW agent install (below) fails.
+
+# Wait for unattended-upgrades / cloud-init to release the apt lock — the
+# DLAMI runs them at boot and can hold /var/lib/dpkg/lock-frontend for a
+# few minutes.
+wait_apt() {
+  local i=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock >/dev/null 2>&1; do
+    i=$((i+1))
+    if [ $i -gt 60 ]; then
+      echo "ERROR: apt lock still held after 10 minutes" >&2
+      return 1
+    fi
+    echo "waiting for apt lock... ($i)"
+    sleep 10
+  done
+}
+
+export DEBIAN_FRONTEND=noninteractive
+
+# ---------- 1. CloudWatch agent FIRST ------------------------------------
+# Install the CW agent before anything else risky so subsequent failures
+# (in step 2 onwards, and in bootstrap-shim.sh) are observable in CloudWatch.
+wait_apt
+apt-get install -y collectd  # CW agent dep
+curl -fsSL https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb \
+  -o /tmp/amazon-cloudwatch-agent.deb
+dpkg -i /tmp/amazon-cloudwatch-agent.deb || (wait_apt && apt-get -y install -f)
+
+mkdir -p /var/log/aws-llm
+chmod 0775 /var/log/aws-llm
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWCFG'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/aws-llm/*.log",
+            "log_group_name": "/aws/aws-llm/extract",
+            "log_stream_name": "{instance_id}"
+          },
+          {
+            "file_path": "/var/log/cloud-init-output.log",
+            "log_group_name": "/aws/aws-llm/cloud-init",
+            "log_stream_name": "{instance_id}"
+          },
+          {
+            "file_path": "/var/log/aws-llm/bootstrap.log",
+            "log_group_name": "/aws/aws-llm/cloud-init",
+            "log_stream_name": "{instance_id}-bootstrap"
+          }
+        ]
+      }
+    }
+  }
+}
+CWCFG
+systemctl enable amazon-cloudwatch-agent
+systemctl start  amazon-cloudwatch-agent
+
+# ---------- 2. Runtime env (sourced by bootstrap-shim.sh + SSM sessions) -----
+# Read by every PAM session including SSM RunCommand.
+cat > /etc/environment <<EOF
+AWS_REGION=${region}
+TABLES_BUCKET_ARN=${tables_bucket_arn}
+TABLES_NAMESPACE=${tables_namespace}
+ARTIFACTS_BUCKET=${artifacts_bucket_name}
+MODEL_S3_URI=${model_s3_uri}
+VLLM_IMAGE_URI=${vllm_image_uri}
+MAX_MODEL_LEN=${max_model_len}
+MAX_NUM_SEQS=${max_num_seqs}
+VLLM_ENDPOINT=http://localhost:8000
+MODEL_NAME=nemotron-nano-30b
+ENABLE_THINKING=${enable_thinking}
+JOBS_QUEUE_URL=${jobs_queue_url}
+ASG_NAME=${asg_name}
+STATE_VOLUME_ID=${state_volume_id}
+PATH=/opt/aws-llm-extract/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EOF
+
+# ---------- 3. Stage-2 systemd one-shot ---------------------------------
+# Pulls the bootstrap-shim.sh from S3, which apt-installs ansible (if
+# absent) and exec's the Ansible playbook from /opt/aws-llm-ansible.
+# A */5 cron installed by the playbook then re-runs the playbook every 5
+# min, so updates flow through `make sync-ansible` alone.
+#
+# To iterate on the shim itself: edit + `aws s3 cp` it back, then SSM
+# `systemctl restart aws-llm-bootstrap`. To iterate on the playbook:
+# `make sync-ansible` and either wait for the cron tick or SSM-trigger
+# the same restart.
+cat > /etc/systemd/system/aws-llm-bootstrap.service <<'EOF'
+[Unit]
+Description=aws-llm runtime bootstrap (fetch shim + run Ansible)
+After=network-online.target amazon-cloudwatch-agent.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/environment
+StandardOutput=append:/var/log/aws-llm/bootstrap.log
+StandardError=append:/var/log/aws-llm/bootstrap.log
+ExecStartPre=/bin/bash -c 'aws s3 cp s3://$${ARTIFACTS_BUCKET}/scripts/bootstrap-shim.sh /opt/aws-llm-bootstrap-shim.sh --region $${AWS_REGION}'
+ExecStartPre=/bin/chmod +x /opt/aws-llm-bootstrap-shim.sh
+ExecStart=/opt/aws-llm-bootstrap-shim.sh
+Restart=on-failure
+RestartSec=30
+StartLimitBurst=3
+StartLimitIntervalSec=600
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now aws-llm-bootstrap.service
+
+echo "user_data complete — handing off to aws-llm-bootstrap.service"

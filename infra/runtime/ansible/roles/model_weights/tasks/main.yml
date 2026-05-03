@@ -1,0 +1,59 @@
+---
+# Sync the FP8 checkpoint to /opt/state/models. `aws s3 sync` is itself
+# idempotent (only fetches changed objects); the .staged marker exists
+# only to short-circuit when nothing could plausibly have changed.
+
+- name: Ensure model dir exists
+  ansible.builtin.file:
+    path: "{{ model_full_path }}"
+    state: directory
+    mode: "0755"
+
+- name: Stat staged marker
+  ansible.builtin.stat:
+    path: "{{ model_marker }}"
+  register: marker_stat
+
+- name: Decide whether to re-sync model from S3
+  ansible.builtin.set_fact:
+    model_sync_needed: >-
+      {{ not marker_stat.stat.exists
+         or (ansible_date_time.epoch | int - marker_stat.stat.mtime | int)
+            > (model_resync_max_age_seconds | int) }}
+
+- name: aws s3 sync model from S3
+  ansible.builtin.command:
+    cmd: aws s3 sync "{{ model_s3_uri }}" "{{ model_full_path }}/" --only-show-errors
+  register: sync_result
+  changed_when: "'download:' in sync_result.stdout or 'upload:' in sync_result.stdout or 'delete:' in sync_result.stdout"
+  when: model_sync_needed
+
+- name: Copy nano_v3_reasoning_parser.py to /opt/state/models
+  ansible.builtin.copy:
+    src: "{{ model_full_path }}/nano_v3_reasoning_parser.py"
+    dest: "{{ model_state_dir }}/nano_v3_reasoning_parser.py"
+    remote_src: true
+    mode: "0644"
+  when: model_sync_needed
+
+- name: Touch staged marker
+  ansible.builtin.file:
+    path: "{{ model_marker }}"
+    state: touch
+    mode: "0644"
+  when: model_sync_needed
+
+- name: Ensure /opt/models exists for bind mount
+  ansible.builtin.file:
+    path: "{{ canonical_models }}"
+    state: directory
+    mode: "0755"
+
+- name: Bind-mount /opt/models → state model dir
+  ansible.posix.mount:
+    path: "{{ canonical_models }}"
+    src: "{{ model_state_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+    boot: false

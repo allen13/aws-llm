@@ -1,0 +1,86 @@
+---
+# Pull the extract tarball, install editable into a venv at
+# /opt/state/extract/.venv. Reinstall only when the S3 etag changes —
+# pip install -e is fast on metadata, slow on link/repath, but doing it
+# every cron tick would still be ~1-2s wasted.
+
+- name: Ensure extract dir exists
+  ansible.builtin.file:
+    path: "{{ extract_state_dir }}"
+    state: directory
+    mode: "0775"
+
+- name: Create extract venv
+  ansible.builtin.command:
+    cmd: "{{ py313_link }} -m venv {{ extract_venv }}"
+    creates: "{{ extract_python }}"
+
+- name: Get S3 etag for extract.tgz
+  ansible.builtin.command:
+    cmd: aws s3api head-object --bucket "{{ artifacts_bucket }}" --key "{{ extract_s3_key }}" --query ETag --output text
+  register: extract_etag_raw
+  changed_when: false
+
+- name: Read deployed etag marker
+  ansible.builtin.slurp:
+    src: "{{ extract_etag_marker }}"
+  register: deployed_etag_b64
+  failed_when: false
+
+- name: Compute drift
+  ansible.builtin.set_fact:
+    extract_current_etag: "{{ extract_etag_raw.stdout | trim | trim('\"') }}"
+    extract_deployed_etag: "{{ (deployed_etag_b64.content | b64decode | trim) if deployed_etag_b64.content is defined else '' }}"
+
+- name: Re-deploy code on etag change
+  when: extract_current_etag != extract_deployed_etag
+  block:
+    - name: Download extract.tgz
+      ansible.builtin.command:
+        cmd: aws s3 cp "s3://{{ artifacts_bucket }}/{{ extract_s3_key }}" /tmp/extract.tgz
+      changed_when: true
+
+    - name: Extract tarball into extract dir
+      ansible.builtin.unarchive:
+        src: /tmp/extract.tgz
+        dest: "{{ extract_state_dir }}"
+        remote_src: true
+        extra_opts: ["--strip-components=1"]
+
+    - name: Upgrade pip
+      ansible.builtin.command:
+        cmd: "{{ extract_python }} -m pip install --quiet --upgrade pip"
+      changed_when: true
+
+    - name: Install extract package editable
+      ansible.builtin.command:
+        cmd: "{{ extract_python }} -m pip install --quiet -e {{ extract_state_dir }}"
+      changed_when: true
+
+    - name: Persist deployed etag
+      ansible.builtin.copy:
+        dest: "{{ extract_etag_marker }}"
+        content: "{{ extract_current_etag }}"
+        mode: "0644"
+
+- name: Ensure /opt/aws-llm-extract exists for bind mount
+  ansible.builtin.file:
+    path: "{{ canonical_extract }}"
+    state: directory
+    mode: "0775"
+
+- name: Bind-mount /opt/aws-llm-extract → state extract dir
+  ansible.posix.mount:
+    path: "{{ canonical_extract }}"
+    src: "{{ extract_state_dir }}"
+    fstype: none
+    opts: bind
+    state: mounted
+    boot: false
+
+- name: Symlink aws-llm-python convenience binary
+  ansible.builtin.file:
+    src: "{{ canonical_extract }}/.venv/bin/python"
+    dest: /usr/local/bin/aws-llm-python
+    state: link
+    force: true

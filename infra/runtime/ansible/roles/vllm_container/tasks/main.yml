@@ -1,0 +1,84 @@
+---
+# vLLM container management. ECR login refreshes the token (cheap, ~200ms;
+# tokens are 12h-TTL anyway). community.docker.docker_container is run with
+# pull=never + image-pinned + strict comparisons so a no-op cron tick does
+# NOT recreate the container.
+
+- name: Get ECR auth token via aws cli
+  ansible.builtin.command:
+    cmd: aws ecr get-login-password --region {{ aws_region }}
+  register: ecr_token
+  changed_when: false
+  no_log: true
+
+- name: Docker login to ECR
+  community.docker.docker_login:
+    registry_url: "{{ vllm_ecr_registry }}"
+    username: AWS
+    password: "{{ ecr_token.stdout }}"
+    reauthorize: true
+  no_log: true
+
+- name: Pull vLLM image (only if absent locally)
+  community.docker.docker_image:
+    name: "{{ vllm_image_uri }}"
+    source: pull
+    force_source: false
+  register: pull_result
+
+- name: Run vLLM container
+  community.docker.docker_container:
+    name: "{{ vllm_container_name }}"
+    image: "{{ vllm_image_uri }}"
+    pull: never
+    state: started
+    restart_policy: unless-stopped
+    detach: true
+    # Modern docker-py + nvidia-container-toolkit: device_requests is the
+    # right path. We don't set `runtime: nvidia` because the daemon's
+    # default runtime stays as `runc`, and the device_request below is
+    # what triggers the nvidia hook for GPU passthrough.
+    device_requests:
+      - driver: nvidia
+        count: -1
+        capabilities:
+          - - gpu
+    shm_size: 16G
+    published_ports:
+      - "8000:8000"
+    mounts:
+      - type: bind
+        source: "{{ canonical_models }}/{{ model_dirname | default('nemotron-nano-30b-fp8') }}"
+        target: /models
+        read_only: true
+      - type: bind
+        source: "{{ canonical_models }}/nano_v3_reasoning_parser.py"
+        target: /opt/vllm/nano_v3_reasoning_parser.py
+        read_only: true
+    command:
+      - --model
+      - /models
+      - --served-model-name
+      - "{{ model_name }}"
+      - --max-model-len
+      - "{{ max_model_len }}"
+      - --max-num-seqs
+      - "{{ max_num_seqs }}"
+      - --kv-cache-dtype
+      - fp8
+      - --enable-prefix-caching
+      - --gpu-memory-utilization
+      - "0.92"
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - qwen3_coder
+      - --reasoning-parser
+      - nano_v3
+      - --reasoning-parser-plugin
+      - /opt/vllm/nano_v3_reasoning_parser.py
+      - --trust-remote-code
+      - --port
+      - "8000"
+    comparisons:
+      "*": strict
+      env: allow_more_present

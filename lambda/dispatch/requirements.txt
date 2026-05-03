@@ -1,0 +1,2 @@
+# boto3 is bundled in the AWS Lambda Python 3.12 runtime; no third-party deps.
+# This file exists so the archive_file zip stays deterministic across rebuilds.

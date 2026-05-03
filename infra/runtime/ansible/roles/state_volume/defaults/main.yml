@@ -1,0 +1,8 @@
+---
+# Tag-based discovery in case the var passed in by run.sh is empty.
+state_volume_tag_project: aws-llm
+state_volume_tag_role: state
+state_volume_device_hint: /dev/sdf      # advisory only; Nitro renames to /dev/nvmeNn1
+state_volume_fs_label: aws-llm-state
+state_volume_fs_type: ext4
+state_volume_mount: "{{ state_mount }}"

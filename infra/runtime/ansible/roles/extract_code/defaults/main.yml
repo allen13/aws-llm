@@ -1,0 +1,6 @@
+---
+extract_state_dir:  "{{ state_mount }}/extract"
+extract_s3_key:     "code/latest/extract.tgz"
+extract_etag_marker: "{{ state_mount }}/markers/extract.etag"
+extract_venv:       "{{ extract_state_dir }}/.venv"
+extract_python:     "{{ extract_venv }}/bin/python"

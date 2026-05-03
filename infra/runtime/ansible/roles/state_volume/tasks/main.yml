@@ -1,0 +1,144 @@
+---
+# Discover, attach, format-if-blank, mount the persistent state EBS volume.
+# Idempotent: every check short-circuits if the desired state is already
+# achieved. The mount is the canonical home for /opt/state, which holds
+# the model, Docker layers, venv, datasets.
+
+- name: Get IMDSv2 token
+  ansible.builtin.uri:
+    url: http://169.254.169.254/latest/api/token
+    method: PUT
+    headers:
+      X-aws-ec2-metadata-token-ttl-seconds: "21600"
+    return_content: true
+  register: imds_token_req
+
+- name: Set IMDS token fact
+  ansible.builtin.set_fact:
+    imds_token: "{{ imds_token_req.content }}"
+
+- name: Get instance-id from IMDS
+  ansible.builtin.uri:
+    url: http://169.254.169.254/latest/meta-data/instance-id
+    method: GET
+    headers:
+      X-aws-ec2-metadata-token: "{{ imds_token }}"
+    return_content: true
+  register: imds_instance_req
+
+- name: Get availability-zone from IMDS
+  ansible.builtin.uri:
+    url: http://169.254.169.254/latest/meta-data/placement/availability-zone
+    method: GET
+    headers:
+      X-aws-ec2-metadata-token: "{{ imds_token }}"
+    return_content: true
+  register: imds_az_req
+
+- name: Stash IMDS values
+  ansible.builtin.set_fact:
+    imds_instance_id: "{{ imds_instance_req.content }}"
+    imds_az: "{{ imds_az_req.content }}"
+
+# Resolve volume id: prefer the var passed in (from terraform_remote_state);
+# fall back to tag-search in the same AZ.
+- name: Discover state volume by tag (fallback path)
+  amazon.aws.ec2_vol_info:
+    region: "{{ aws_region }}"
+    filters:
+      "tag:Project": "{{ state_volume_tag_project }}"
+      "tag:Role": "{{ state_volume_tag_role }}"
+      availability-zone: "{{ imds_az }}"
+  register: tag_volumes
+  when: state_volume_id | length == 0
+
+- name: Pick state volume id
+  ansible.builtin.set_fact:
+    resolved_state_volume_id: >-
+      {{ state_volume_id
+         if state_volume_id | length > 0
+         else (tag_volumes.volumes[0].volume_id | default('')) }}
+
+- name: Fail if no state volume could be resolved
+  ansible.builtin.fail:
+    msg: "No state volume resolved by var or tag in AZ {{ imds_az }}"
+  when: resolved_state_volume_id | length == 0
+
+- name: Inspect current attachment of state volume
+  amazon.aws.ec2_vol_info:
+    region: "{{ aws_region }}"
+    filters:
+      volume-id: "{{ resolved_state_volume_id }}"
+  register: state_vol_info
+
+- name: Detach if attached to a stale instance
+  amazon.aws.ec2_vol:
+    region: "{{ aws_region }}"
+    id: "{{ resolved_state_volume_id }}"
+    instance: ""        # empty string requests detach
+  when:
+    - state_vol_info.volumes[0].attachment_set.instance_id is defined
+    - state_vol_info.volumes[0].attachment_set.instance_id != imds_instance_id
+    - state_vol_info.volumes[0].attachment_set.instance_id != ""
+
+- name: Attach state volume to this instance (idempotent)
+  amazon.aws.ec2_vol:
+    region: "{{ aws_region }}"
+    id: "{{ resolved_state_volume_id }}"
+    instance: "{{ imds_instance_id }}"
+    device_name: "{{ state_volume_device_hint }}"
+  register: attach_result
+
+- name: Wait for kernel to enumerate the EBS device
+  ansible.builtin.shell: |
+    set -e
+    vid="{{ resolved_state_volume_id | replace('-', '') }}"
+    for _ in $(seq 1 30); do
+      dev=$(lsblk -dno NAME,SERIAL | awk -v v="$vid" '$2==v{print "/dev/"$1; exit}')
+      if [ -n "$dev" ]; then echo "$dev"; exit 0; fi
+      sleep 2
+    done
+    exit 1
+  args:
+    executable: /bin/bash
+  register: state_blk
+  changed_when: false
+
+- name: Set discovered block device
+  ansible.builtin.set_fact:
+    state_volume_blk: "{{ state_blk.stdout | trim }}"
+
+- name: Detect filesystem on state volume
+  ansible.builtin.command: blkid -o value -s TYPE {{ state_volume_blk }}
+  register: blkid_check
+  failed_when: false
+  changed_when: false
+
+- name: Format state volume if blank
+  community.general.filesystem:
+    fstype: "{{ state_volume_fs_type }}"
+    dev: "{{ state_volume_blk }}"
+    opts: "-L {{ state_volume_fs_label }}"
+  when: blkid_check.rc != 0 or blkid_check.stdout | length == 0
+
+- name: Mount state volume
+  ansible.posix.mount:
+    path: "{{ state_volume_mount }}"
+    src: "{{ state_volume_blk }}"
+    fstype: "{{ state_volume_fs_type }}"
+    opts: defaults,noatime
+    state: mounted
+    boot: false       # ASG is ephemeral; fstab persistence is not useful
+                      # and would block boot if the volume's not attached yet
+
+- name: Ensure state subdirs exist
+  ansible.builtin.file:
+    path: "{{ state_volume_mount }}/{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - models
+    - data
+    - extract
+    - docker
+    - markers

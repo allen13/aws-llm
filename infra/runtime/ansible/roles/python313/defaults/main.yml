@@ -1,0 +1,11 @@
+---
+py313_tag: "20260414"
+py313_version: "3.13.13"
+py313_arch: x86_64-unknown-linux-gnu
+py313_variant: install_only_stripped
+
+py313_tarball_name: "cpython-{{ py313_version }}+{{ py313_tag }}-{{ py313_arch }}-{{ py313_variant }}.tar.gz"
+py313_url: "https://github.com/astral-sh/python-build-standalone/releases/download/{{ py313_tag }}/{{ py313_tarball_name }}"
+py313_install_dir: /opt/python3.13
+py313_bin: "{{ py313_install_dir }}/bin/python3.13"
+py313_link: /usr/local/bin/python3.13

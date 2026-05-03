@@ -1,0 +1,28 @@
+[Unit]
+Description=aws-llm SQS worker (drains s3 inbox, runs extract_batch, self-terminates)
+After=docker.service
+Wants=docker.service
+# No ConditionPathExists guard: the Ansible playbook sequences this unit's
+# (re)start AFTER the vllm_container role completes, so vLLM is up before
+# the worker runs. The After=aws-llm-bootstrap.service ordering from the
+# old shell-bootstrap world is moot now — bootstrap-via-Ansible IS the
+# thing managing this unit.
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/environment
+# Debugging knob, owned by the sqs_worker Ansible role's defaults. When
+# disable_self_terminate is true the worker ignores wall/idle caps and
+# SIGTERM, so the instance stays up across iterations of cron-pulled
+# playbook updates. Flip back to false for production.
+Environment=DISABLE_SELF_TERMINATE={{ disable_self_terminate | default(false) | string | lower }}
+ExecStart={{ canonical_extract }}/.venv/bin/python -m extract_lib.sqs_worker
+StandardOutput=append:{{ log_dir }}/sqs-worker.log
+StandardError=append:{{ log_dir }}/sqs-worker.log
+Restart=on-failure
+RestartSec=15
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+[Install]
+WantedBy=multi-user.target
